@@ -1,3 +1,4 @@
+using Azure.Messaging.ServiceBus;
 using DotNetCoreSqlDb.Data;
 using DotNetCoreSqlDb.Models;
 using Microsoft.AspNetCore.Mvc;
@@ -9,10 +10,12 @@ namespace DotNetCoreSqlDb.Controllers
     {
         private readonly ILogger<TodosController> _logger;
         private readonly MyDatabaseContext _context;
+        private readonly ServiceBusSender _todoSender;
 
-        public TodosController(MyDatabaseContext context, ILogger<TodosController> logger)
+        public TodosController(MyDatabaseContext context, ServiceBusSender todoSender, ILogger<TodosController> logger)
         {
             _context = context;
+            _todoSender = todoSender;
             _logger = logger;
         }
 
@@ -32,6 +35,7 @@ namespace DotNetCoreSqlDb.Controllers
             {
                 _context.Add(todo);
                 await _context.SaveChangesAsync();
+                await PublishTodoCreatedAsync(todo);
 
                 return RedirectToAction(nameof(Index));
             }
@@ -64,6 +68,28 @@ namespace DotNetCoreSqlDb.Controllers
                 NewTodo = newTodo ?? new Todo(),
                 Todos = await _context.Todo.AsNoTracking().ToListAsync()
             };
+        }
+
+        private async Task PublishTodoCreatedAsync(Todo todo)
+        {
+            var payload = new TodoCreatedMessage(todo.ID, todo.Description, DateTimeOffset.UtcNow);
+            var message = new ServiceBusMessage(BinaryData.FromObjectAsJson(payload))
+            {
+                ContentType = "application/json",
+                Subject = "TodoCreated",                // message type, useful for routing and filtering
+                MessageId = $"todo-created-{todo.ID}"   // stable ID so the worker can detect duplicates
+            };
+
+            try
+            {
+                await _todoSender.SendMessageAsync(message);
+                _logger.LogInformation("Sent TodoCreated message for todo {TodoId}.", todo.ID);
+            }
+            catch (Exception ex)
+            {
+                // The todo is already saved, so don't fail the request just because the message couldn't be sent.
+                _logger.LogError(ex, "Failed to send TodoCreated message for todo {TodoId}.", todo.ID);
+            }
         }
     }
 }
